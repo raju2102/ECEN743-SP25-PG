@@ -26,6 +26,7 @@ import argparse
 import numpy as np
 import math
 from collections import deque
+import matplotlib.pyplot as plt
 
 class value_network(nn.Module):
     '''
@@ -129,13 +130,13 @@ class PGAgent():
         self.action_dim = action_dim
         self.discount = discount
         self.lr = lr
-        self.device = torch.device('cuda', index=gpu_index) if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda", gpu_index) if torch.cuda.is_available() else "cpu")
         self.env_name = env
         self.seed = seed
         self.policy = policy_network(state_dim,action_dim)
         self.value = value_network(state_dim)
-        self.optimizer_policy = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
-        self.optimizer_value = torch.optim.Adam(self.value.parameters(), lr=self.lr)
+        self.optimizer_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
+        self.optimizer_value = optim.Adam(self.value.parameters(), lr=self.lr)
 
     def sample_traj(self,batch_size=2000,evaluate = False):
         '''
@@ -162,7 +163,8 @@ class PGAgent():
                         action = self.policy(state_ten)[0][0].numpy() # Take mean action during evaluation
                     else:
                         action = self.policy.select_action(state_ten)[0].numpy() # Sample from distribution during training
-                action = action.astype(np.float64)
+                # action = action.astype(np.float64) TODO: change back to float64 when using CUDA
+                action = action.astype(np.float32)
                 n_state,reward,terminated,truncated,_ = env.step(action) # Execute action in the environment
                 done = terminated or truncated
                 states.append(state)
@@ -197,10 +199,16 @@ class PGAgent():
         self.policy.to(self.device) #Move policy to GPU
         if update_type == "Baseline":
             self.value.to(self.device)  #Move value to GPU
-        states_ten = torch.from_numpy(np.stack(states)).to(self.device)   #Convert to tensor and move to GPU
-        action_ten = torch.from_numpy(np.stack(actions)).to(self.device)  #Convert to tensor and move to GPU
-        rewards_ten = torch.from_numpy(np.stack(rewards)).to(self.device) #Convert to tensor and move to GPU
-        n_dones_ten = torch.from_numpy(np.stack(n_dones)).to(self.device) #Convert to tensor and move to GPU
+        # states_ten = torch.from_numpy(np.stack(states)).to(self.device)   #Convert to tensor and move to GPU
+        # action_ten = torch.from_numpy(np.stack(actions)).to(self.device)  #Convert to tensor and move to GPU
+        # rewards_ten = torch.from_numpy(np.stack(rewards)).to(self.device) #Convert to tensor and move to GPU
+        # n_dones_ten = torch.from_numpy(np.stack(n_dones)).to(self.device) #Convert to tensor and move to GPU
+        
+        # TODO: Remove if not MPS
+        states_ten = torch.from_numpy(np.stack(states)).float().to(self.device)
+        action_ten = torch.from_numpy(np.stack(actions)).float().to(self.device)
+        rewards_ten = torch.from_numpy(np.stack(rewards)).float().to(self.device)
+        n_dones_ten = torch.from_numpy(np.stack(n_dones)).float().to(self.device)
 
         if update_type == "Rt":
             '''
@@ -211,6 +219,25 @@ class PGAgent():
             '''
             ###### TYPE YOUR CODE HERE ######
             # Do steps 1-3
+            splits = (n_dones_ten == 0).nonzero(as_tuple=True)[0] + 1
+            split_points = torch.cat([torch.tensor([0]).to(self.device), splits])
+            if split_points[-1] != n_dones_ten.shape[0]:
+                split_points = torch.cat([split_points, torch.tensor([n_dones_ten.shape[0]], device=split_points.device)])
+            state_trajs = torch.split(states_ten, torch.diff(split_points).tolist())
+            reward_trajs = torch.split(rewards_ten, torch.diff(split_points).tolist())
+            action_trajs = torch.split(action_ten, torch.diff(split_points).tolist())
+            loss = 0
+            for i in range(len(state_trajs)):
+                logprobs = self.policy.get_log_prob(state_trajs[i], action_trajs[i])
+                discount_factors = self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)
+                discounted_reward = torch.sum(reward_trajs[i].float().view(-1) * discount_factors) 
+                loss += - discounted_reward * logprobs.sum()
+                
+            self.optimizer_policy.zero_grad()
+            loss.backward()
+            self.optimizer_policy.step()
+            
+            
             ################################# 
 
         if update_type == 'Gt':
@@ -295,7 +322,8 @@ if __name__ == "__main__":
     learner = PGAgent(**kwargs) # Creating the PG learning agent
 
     moving_window = deque(maxlen=10)
-
+    train_rewards = []
+    eval_rewards = []
     for e in range(args.n_iter):
         '''
         Steps of PG algorithm
@@ -318,3 +346,31 @@ if __name__ == "__main__":
         """
         ###### TYPE YOUR CODE HERE ######
         #################################
+        train_rewards.append(train_reward)
+        eval_rewards.append(eval_reward)
+
+        # 2. Optional: Render the trained agent every 10 iterations or at the end
+        if (e + 1) % 500 == 0 or e == args.n_iter - 1:
+            render_env = gym.make(args.env, render_mode="human", continuous=True)
+            obs, _ = render_env.reset(seed=args.seed)
+            done = False
+            learner.policy.to(learner.device).eval() 
+            while not done:
+                state_ten = torch.from_numpy(obs).float().unsqueeze(0).to(learner.device)
+                with torch.no_grad():
+                    action = learner.policy(state_ten)[0][0].cpu().numpy()
+                obs, _, terminated, truncated, _ = render_env.step(action)
+                done = terminated or truncated
+            render_env.close()
+
+    plt.figure()
+    plt.plot(train_rewards, label="Training Reward")
+    plt.plot(eval_rewards, label="Evaluation Reward")
+    plt.axhline(y=200, color='r', linestyle='--', label='Solved Threshold')
+    plt.xlabel("Training Iteration")
+    plt.ylabel("Reward")
+    plt.title(f"{args.algo} on {args.env}")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{args.algo}_{args.env}_reward_curve.png")
+    plt.show()
