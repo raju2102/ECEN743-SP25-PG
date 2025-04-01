@@ -131,6 +131,7 @@ class PGAgent():
         self.discount = discount
         self.lr = lr
         self.device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda", gpu_index) if torch.cuda.is_available() else "cpu")
+        print(f"using {self.device}")
         self.env_name = env
         self.seed = seed
         self.policy = policy_network(state_dim,action_dim)
@@ -354,11 +355,17 @@ if __name__ == "__main__":
         eval_rewards.append(eval_reward)
 
         # 2. Optional: Render the trained agent every 10 iterations or at the end
-        if (e + 1) % 500 == 0 or e == args.n_iter - 1:
-            render_env = gym.make(args.env, render_mode="human", continuous=True)
+        if (e + 1) % 1000 == 0 or e == args.n_iter - 1:
+            video_path = f"videos/{args.algo}_{args.env}_iter{e+1}"
+            render_env = gym.wrappers.RecordVideo(
+                gym.make(args.env, render_mode="rgb_array", continuous=True),
+                video_folder=video_path,
+                name_prefix=f"{args.algo}_iter{e+1}",
+                episode_trigger=lambda episode_id: True,
+            )
             obs, _ = render_env.reset(seed=args.seed)
             done = False
-            learner.policy.to(learner.device).eval() 
+            learner.policy.to(learner.device).eval()
             while not done:
                 state_ten = torch.from_numpy(obs).float().unsqueeze(0).to(learner.device)
                 with torch.no_grad():
@@ -377,4 +384,4 @@ if __name__ == "__main__":
     plt.legend()
     plt.grid(True)
     plt.savefig(f"{args.algo}_{args.env}_reward_curve.png")
-    plt.show()
+    # plt.show()
