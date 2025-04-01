@@ -226,16 +226,17 @@ class PGAgent():
             state_trajs = torch.split(states_ten, torch.diff(split_points).tolist())
             reward_trajs = torch.split(rewards_ten, torch.diff(split_points).tolist())
             action_trajs = torch.split(action_ten, torch.diff(split_points).tolist())
-            loss = 0
+            discounted_rewards = []
+            logprobs = []
             for i in range(len(state_trajs)):
-                logprobs = self.policy.get_log_prob(state_trajs[i], action_trajs[i])
+                logprobs.append(self.policy.get_log_prob(state_trajs[i], action_trajs[i]))
                 discount_factors = self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)
-                discounted_reward = torch.sum(reward_trajs[i].float().view(-1) * discount_factors) 
-                loss += - discounted_reward * logprobs.sum()
+                discounted_rewards.append(torch.sum(reward_trajs[i].float().view(-1) * discount_factors))
+            discounted_rewards = torch.stack(discounted_rewards)
+            discounted_rewards = (discounted_rewards - torch.mean(discounted_rewards)) / torch.std(discounted_rewards)
+            logprobs = torch.stack([lp.sum() for lp in logprobs])
+            loss = - torch.sum(discounted_rewards * logprobs)
                 
-            self.optimizer_policy.zero_grad()
-            loss.backward()
-            self.optimizer_policy.step()
             
             
             ################################# 
@@ -285,6 +286,9 @@ class PGAgent():
             # Do steps 5-7
             #################################
 
+        self.optimizer_policy.zero_grad()
+        loss.backward()
+        self.optimizer_policy.step()
 
 
 if __name__ == "__main__":
