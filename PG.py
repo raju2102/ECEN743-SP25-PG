@@ -236,7 +236,7 @@ class PGAgent():
             discounted_rewards = torch.stack(discounted_rewards)
             discounted_rewards = (discounted_rewards - torch.mean(discounted_rewards)) / torch.std(discounted_rewards)
             logprobs = torch.stack([lp.sum() for lp in logprobs])
-            loss = - torch.sum(discounted_rewards * logprobs)
+            loss = - torch.mean(discounted_rewards * logprobs)
                 
             
             
@@ -250,13 +250,39 @@ class PGAgent():
             3. Compute log probabilities using states_ten and action_ten
             4. Compute policy loss and update the policy
             '''
-            gt = torch.zeros(rewards_ten.shape[0],1).to(self.device)
+            # gt = torch.zeros(rewards_ten.shape[0],1).to(self.device)
 
             ###### TYPE YOUR CODE HERE ######
             # Compute reward_to_go (gt) 
             #################################
-
+            splits = (n_dones_ten == 0).nonzero(as_tuple=True)[0] + 1
+            split_points = torch.cat([torch.tensor([0]).to(self.device), splits])
+            if split_points[-1] != n_dones_ten.shape[0]:
+                split_points = torch.cat([split_points, torch.tensor([n_dones_ten.shape[0]], device=split_points.device)])
+            state_trajs = torch.split(states_ten, torch.diff(split_points).tolist())
+            reward_trajs = torch.split(rewards_ten, torch.diff(split_points).tolist())
+            action_trajs = torch.split(action_ten, torch.diff(split_points).tolist())
+            logprobs = []
+            gt = []
+            for i in range(len(reward_trajs)):
+                traj_return_togo = torch.flip(
+                    torch.cumsum(
+                        torch.flip(reward_trajs[i], dims=[0]) *
+                        (self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)),
+                        dim=0
+                    ),
+                    dims=[0]
+                )
+                gt.append(traj_return_togo)
+            gt = torch.cat(gt)
             gt = (gt - gt.mean()) / gt.std() #Helps with learning stablity
+            gt = torch.split(gt, torch.diff(split_points).tolist())
+            inner_vals = []
+            for i in range(len(state_trajs)):
+                logprobs.append(self.policy.get_log_prob(state_trajs[i], action_trajs[i]))
+                discount_factors = self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)
+                inner_vals.append(torch.sum(logprobs[i] * discount_factors * gt[i]))
+            loss = - torch.mean(inner_vals)
 
             ###### TYPE YOUR CODE HERE ######
             # Compute log probabilities and update the policy
