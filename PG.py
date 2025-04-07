@@ -149,6 +149,7 @@ class PGAgent():
         '''
         self.policy.to("cpu") #Move network to CPU for sampling
         env = gym.make(args.env,continuous=True)
+        # env = gym.make(args.env) # USE THIS FOR PENDULUM
         states = []
         actions = []
         rewards = []
@@ -315,12 +316,42 @@ class PGAgent():
             ###### TYPE YOUR CODE HERE ######
             # Compute reward_to_go (gt) and advantages  
             #################################
+            splits = (n_dones_ten == 0).nonzero(as_tuple=True)[0] + 1
+            split_points = torch.cat([torch.tensor([0]).to(self.device), splits])
+            if split_points[-1] != n_dones_ten.shape[0]:
+                split_points = torch.cat([split_points, torch.tensor([n_dones_ten.shape[0]], device=split_points.device)])
 
+            reward_trajs = torch.split(rewards_ten, torch.diff(split_points).tolist())
+
+            idx = 0
+            for rewards in reward_trajs:
+                g = 0
+                for t in reversed(range(len(rewards))):
+                    g = rewards[t] + self.discount * g
+                    gt[idx + t] = g
+                idx += len(rewards)
+
+            advantages = gt - values_adv
             advantages = (advantages - advantages.mean()) / advantages.std()
 
             ###### TYPE YOUR CODE HERE ######
             # Do steps 5-7
             #################################
+            
+            value_preds = self.value(states_ten)
+            value_loss = F.mse_loss(value_preds, gt)
+            self.optimizer_value.zero_grad()
+            value_loss.backward()
+            self.optimizer_value.step()
+            
+            log_probs = self.policy.get_log_prob(states_ten, action_ten)
+            policy_loss = -torch.mean(log_probs * advantages)
+            self.optimizer_policy.zero_grad()
+            policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.7)
+            self.optimizer_policy.step()
+            
+            
 
         
 
@@ -339,6 +370,7 @@ if __name__ == "__main__":
 
     # Making the environment    
     env = gym.make(args.env,continuous=True)
+    # env = gym.make(args.env)  # USE THIS FOR PENDULUM
 
     # Setting seeds
     torch.manual_seed(args.seed)
@@ -391,26 +423,30 @@ if __name__ == "__main__":
         if (e + 1) % args.n_iter == 0 or e == args.n_iter - 1:
             video_path = f"videos/{args.algo}_{args.env}_iter{e+1}"
             render_env = gym.wrappers.RecordVideo(
-                gym.make(args.env, render_mode="rgb_array", continuous=True),
+                gym.make(args.env, render_mode="rgb_array", continuous=True), 
+                # gym.make(args.env, render_mode="rgb_array"), # USE THIS FOR PENDULUM
                 video_folder=video_path,
                 name_prefix=f"{args.algo}_iter{e+1}",
                 episode_trigger=lambda episode_id: True,
             )
             obs, _ = render_env.reset(seed=args.seed)
             done = False
+            reward_sum = 0
             learner.policy.to(learner.device).eval()
             while not done:
                 state_ten = torch.from_numpy(obs).float().unsqueeze(0).to(learner.device)
                 with torch.no_grad():
                     action = learner.policy(state_ten)[0][0].cpu().numpy()
-                obs, _, terminated, truncated, _ = render_env.step(action)
+                obs, reward, terminated, truncated, _ = render_env.step(action)
+                reward_sum += reward
                 done = terminated or truncated
             render_env.close()
+            print(f"[Video] Iteration {e+1}: Episode reward = {reward_sum:.2f}")
 
     plt.figure()
     plt.plot(train_rewards, label="Training Reward")
     plt.plot(eval_rewards, label="Evaluation Reward")
-    plt.axhline(y=200, color='r', linestyle='--', label='Solved Threshold')
+    # plt.axhline(y=200, color='r', linestyle='--', label='Solved Threshold')
     plt.xlabel("Training Iteration")
     plt.ylabel("Reward")
     plt.title(f"{args.algo} on {args.env}")
