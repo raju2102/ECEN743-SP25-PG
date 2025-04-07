@@ -161,6 +161,7 @@ class PGAgent():
                 state_ten = torch.from_numpy(state).float().unsqueeze(0)
                 with torch.no_grad():
                     if evaluate:
+                        # print(f"value: {self.policy(state_ten)}")
                         action = self.policy(state_ten)[0][0].numpy() # Take mean action during evaluation
                     else:
                         action = self.policy.select_action(state_ten)[0].numpy() # Sample from distribution during training
@@ -178,8 +179,11 @@ class PGAgent():
                 if done:
                     break
             curr_reward_list.append(curr_reward)
+            # print(curr_reward)
         if evaluate:
+            # print(curr_reward_list)
             return np.mean(curr_reward_list)
+
         return states,actions,rewards,n_dones, np.mean(curr_reward_list)
     
 
@@ -237,6 +241,10 @@ class PGAgent():
             discounted_rewards = (discounted_rewards - torch.mean(discounted_rewards)) / torch.std(discounted_rewards)
             logprobs = torch.stack([lp.sum() for lp in logprobs])
             loss = - torch.mean(discounted_rewards * logprobs)
+            
+            self.optimizer_policy.zero_grad()
+            loss.backward()
+            self.optimizer_policy.step()
                 
             
             
@@ -250,7 +258,7 @@ class PGAgent():
             3. Compute log probabilities using states_ten and action_ten
             4. Compute policy loss and update the policy
             '''
-            # gt = torch.zeros(rewards_ten.shape[0],1).to(self.device)
+            gt = torch.zeros(rewards_ten.shape[0],1).to(self.device)
 
             ###### TYPE YOUR CODE HERE ######
             # Compute reward_to_go (gt) 
@@ -263,26 +271,27 @@ class PGAgent():
             reward_trajs = torch.split(rewards_ten, torch.diff(split_points).tolist())
             action_trajs = torch.split(action_ten, torch.diff(split_points).tolist())
             logprobs = []
-            gt = []
-            for i in range(len(reward_trajs)):
-                traj_return_togo = torch.flip(
-                    torch.cumsum(
-                        torch.flip(reward_trajs[i], dims=[0]) *
-                        (self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)),
-                        dim=0
-                    ),
-                    dims=[0]
-                )
-                gt.append(traj_return_togo)
-            gt = torch.cat(gt)
+            idx = 0
+            for rewards in reward_trajs:
+                g = 0
+                for t in reversed(range(len(rewards))):
+                    g = rewards[t] + self.discount * g
+                    gt[idx + t] = g
+                idx += len(rewards)
+                
             gt = (gt - gt.mean()) / gt.std() #Helps with learning stablity
             gt = torch.split(gt, torch.diff(split_points).tolist())
             inner_vals = []
             for i in range(len(state_trajs)):
                 logprobs.append(self.policy.get_log_prob(state_trajs[i], action_trajs[i]))
-                discount_factors = self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)
-                inner_vals.append(torch.sum(logprobs[i] * discount_factors * gt[i]))
-            loss = - torch.mean(inner_vals)
+                # discount_factors = self.discount ** torch.arange(len(reward_trajs[i]), device=reward_trajs[i].device, dtype=torch.float32)
+                inner_vals.append(torch.sum(logprobs[i] * gt[i]))
+            loss = - torch.mean(torch.stack(inner_vals))
+            
+            self.optimizer_policy.zero_grad()
+            loss.backward()
+            # torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.7)
+            self.optimizer_policy.step()
 
             ###### TYPE YOUR CODE HERE ######
             # Compute log probabilities and update the policy
@@ -313,9 +322,7 @@ class PGAgent():
             # Do steps 5-7
             #################################
 
-        self.optimizer_policy.zero_grad()
-        loss.backward()
-        self.optimizer_policy.step()
+        
 
 
 if __name__ == "__main__":
@@ -381,7 +388,7 @@ if __name__ == "__main__":
         eval_rewards.append(eval_reward)
 
         # 2. Optional: Render the trained agent every 10 iterations or at the end
-        if (e + 1) % 1000 == 0 or e == args.n_iter - 1:
+        if (e + 1) % args.n_iter == 0 or e == args.n_iter - 1:
             video_path = f"videos/{args.algo}_{args.env}_iter{e+1}"
             render_env = gym.wrappers.RecordVideo(
                 gym.make(args.env, render_mode="rgb_array", continuous=True),
